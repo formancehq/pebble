@@ -18,7 +18,7 @@ require (
 	github.com/golang/snappy v0.0.5-0.20231225225746-43d5d4cd4e0e
 	github.com/google/btree v1.1.3
 	github.com/guptarohit/asciigraph v0.5.5
-	github.com/klauspost/compress v1.17.11
+	github.com/klauspost/compress v1.18.7
 	github.com/kr/pretty v0.3.1
 	github.com/minio/minlz v1.0.2-0.20260119185444-845e64f85661
 	github.com/olekukonko/tablewriter v0.0.5
@@ -32,9 +32,9 @@ require (
 	github.com/zeebo/xxh3 v1.0.2
 	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6
 	golang.org/x/perf v0.0.0-20251112180420-cfbd823f7301
-	golang.org/x/sync v0.18.0
-	golang.org/x/sys v0.38.0
-	golang.org/x/tools v0.39.0
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/tools v0.49.0
 )
 
 require (
@@ -55,8 +55,8 @@ require (
 	github.com/prometheus/procfs v0.10.1 // indirect
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	golang.org/x/mod v0.30.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/mod v0.40.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
