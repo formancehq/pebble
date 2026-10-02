@@ -48,7 +48,7 @@ jobs:
       GO_BRANCH: ${{ inputs.go_branch }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha || github.sha }}
 
@@ -61,14 +61,14 @@ jobs:
 
       # Step 2: Restore cache (per branch + commit SHA)
       - name: Cache custom Go toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/cockroachdb-go/${{ env.GO_SHA }}
           key: cockroachdb-${{ env.GO_SHA }}
 
       # Step 3: Install bootstrap Go (needed to build fork)
       - name: Install bootstrap Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.bootstrap_go_version }}
 
