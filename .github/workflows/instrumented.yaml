@@ -37,12 +37,12 @@ jobs:
     name: linux-race
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha || github.sha }}
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.go_version }}
 
@@ -61,14 +61,14 @@ jobs:
     name: linux-asan
     # We have seen crashes with 24.04 that don't reproduce with 22.04 and are
     # likely some asan bug triggered by a specific kernel (#5342).
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha || github.sha }}
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.go_version }}
 
@@ -87,12 +87,12 @@ jobs:
     name: linux-msan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha || github.sha }}
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.go_version }}
 
