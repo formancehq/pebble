@@ -167,6 +167,21 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+func TestWALCloseErrorPreservesDiagnostic(t *testing.T) {
+	fs := errorfs.Wrap(vfs.NewMem(), errorfs.ErrInjected.If(errorfs.OnIndex(30)))
+	d, err := Open("", &Options{FS: fs, Logger: panicLogger{}})
+	require.NoError(t, err)
+	defer func() {
+		if r := recover(); r != nil {
+			err, ok := r.(error)
+			require.True(t, ok, "expected logger panic to carry the fatal diagnostic")
+			require.EqualError(t, err, "fatal: pebble: error closing WAL; data loss possible if we continue: injected error")
+		}
+	}()
+	require.NoError(t, d.Set([]byte("a"), []byte("b"), nil))
+	d.Flush()
+}
+
 // TestRequireReadError injects FS errors into read operations at successively later
 // points until all operations can complete. It requires an operation fails any time
 // an error was injected. This differs from the TestErrors case above as that one
