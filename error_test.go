@@ -33,6 +33,12 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 	panic(errors.Errorf("fatal: "+format, args...))
 }
 
+type returningFatalLogger struct{}
+
+func (l returningFatalLogger) Infof(format string, args ...interface{})  {}
+func (l returningFatalLogger) Errorf(format string, args ...interface{}) {}
+func (l returningFatalLogger) Fatalf(format string, args ...interface{}) {}
+
 // corruptFS injects a corruption in the `index`th byte read.
 type corruptFS struct {
 	vfs.FS
@@ -172,11 +178,25 @@ func TestWALCloseErrorPreservesDiagnostic(t *testing.T) {
 	d, err := Open("", &Options{FS: fs, Logger: panicLogger{}})
 	require.NoError(t, err)
 	defer func() {
-		if r := recover(); r != nil {
-			err, ok := r.(error)
-			require.True(t, ok, "expected logger panic to carry the fatal diagnostic")
-			require.EqualError(t, err, "fatal: pebble: error closing WAL; data loss possible if we continue: injected error")
-		}
+		r := recover()
+		require.NotNil(t, r, "expected WAL close failure to terminate the operation")
+		err, ok := r.(error)
+		require.True(t, ok, "expected logger panic to carry the fatal diagnostic")
+		require.EqualError(t, err, "fatal: pebble: error closing WAL; data loss possible if we continue: injected error")
+	}()
+	require.NoError(t, d.Set([]byte("a"), []byte("b"), nil))
+	d.Flush()
+}
+
+func TestWALCloseErrorPanicsIfFatalLoggerReturns(t *testing.T) {
+	fs := errorfs.Wrap(vfs.NewMem(), errorfs.ErrInjected.If(errorfs.OnIndex(30)))
+	d, err := Open("", &Options{FS: fs, Logger: returningFatalLogger{}})
+	require.NoError(t, err)
+	defer func() {
+		r := recover()
+		err, ok := r.(error)
+		require.True(t, ok, "expected a panic when Fatalf returns")
+		require.EqualError(t, err, "injected error")
 	}()
 	require.NoError(t, d.Set([]byte("a"), []byte("b"), nil))
 	d.Flush()

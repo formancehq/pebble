@@ -2823,6 +2823,9 @@ func (d *DB) rotateWAL() (newLogNum base.DiskFileNum, prevLogSize uint64) {
 		// observe the mutex in the state promised by this function.
 		d.mu.Lock()
 		d.opts.Logger.Fatalf("pebble: error closing WAL; data loss possible if we continue: %s", err)
+		// Fatalf implementations are allowed to return. Do not fall through to
+		// the second lock below, and preserve the primary I/O error for callers.
+		panic(err)
 	}
 	prevLogSize = uint64(offset)
 	metrics := d.mu.log.writer.Metrics()
