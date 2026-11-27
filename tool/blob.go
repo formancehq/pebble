@@ -45,7 +45,7 @@ func newBlob(opts *pebble.Options) *blobT {
 Print the layout for the given blob files.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  s.runLayout,
+		RunE: s.runLayout,
 	}
 	s.Root.AddCommand(s.Layout)
 	return s
@@ -78,28 +78,25 @@ func (b *blobT) newReader(
 // foreachBlob opens each blob file specified in the args (if an arg is a
 // directory, it is walked for blob files) and calls the given function.
 func (b *blobT) foreachBlob(
-	stderr io.Writer, args []string, fn func(path string, r *blob.FileReader),
-) {
-	processFileFn := func(path string, r *blob.FileReader) error {
-		fn(path, r)
-		return nil
-	}
+	stderr io.Writer, args []string, fn func(path string, r *blob.FileReader) error,
+) error {
+	processFileFn := fn
 	closeReaderFn := func(r *blob.FileReader) error {
 		return r.Close()
 	}
-	processFiles(stderr, b.opts.FS, args, []string{".blob"}, b.newReader, closeReaderFn, processFileFn)
+	return processFiles(stderr, b.opts.FS, args, []string{".blob"}, b.newReader, closeReaderFn, processFileFn)
 }
 
-func (b *blobT) runLayout(cmd *cobra.Command, args []string) {
+func (b *blobT) runLayout(cmd *cobra.Command, args []string) error {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
-	b.foreachBlob(stderr, args, func(path string, r *blob.FileReader) {
+	return b.foreachBlob(stderr, args, func(path string, r *blob.FileReader) error {
 		fmt.Fprintf(stdout, "%s\n", path)
 
 		l, err := r.Layout()
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
 		fmt.Fprintf(stdout, "%s\n", l)
+		return nil
 	})
 }

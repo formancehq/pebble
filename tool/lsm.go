@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"slices"
 
@@ -138,7 +137,10 @@ func (l *lsmT) runLSM(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	edits := l.readManifest(args[0])
+	edits, err := l.readManifest(args[0])
+	if err != nil {
+		return err
+	}
 	if edits == nil {
 		return nil
 	}
@@ -182,7 +184,11 @@ func (l *lsmT) runLSM(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(w, "<script src=\"data/d3.v5.min.js\"></script>\n")
 	}
 	fmt.Fprintf(w, "<script type=\"text/javascript\">\n")
-	fmt.Fprintf(w, "data = %s\n", l.formatJSON(l.state))
+	data, err := l.formatJSON(l.state)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "data = %s\n", data)
 	fmt.Fprintf(w, "</script>\n")
 	if l.embed {
 		fmt.Fprintf(w, "<script type=\"text/javascript\">%s</script>\n", lsmDataJS)
@@ -194,41 +200,36 @@ func (l *lsmT) runLSM(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func (l *lsmT) readManifest(path string) []*manifest.VersionEdit {
+func (l *lsmT) readManifest(path string) (edits []*manifest.VersionEdit, retErr error) {
 	f, err := l.opts.FS.Open(path)
 	if err != nil {
-		fmt.Fprintf(l.Root.OutOrStderr(), "%s\n", err)
-		return nil
+		return nil, err
 	}
-	defer f.Close()
+	defer func() { retErr = errors.CombineErrors(retErr, f.Close()) }()
 
 	l.state.Manifest = path
 
-	var edits []*manifest.VersionEdit
-	w := l.Root.OutOrStdout()
 	rr := record.NewReader(f, 0 /* logNum */)
 	for i := 0; ; i++ {
 		r, err := rr.Next()
 		if err != nil {
-			if err != io.EOF {
-				fmt.Fprintf(w, "%s\n", err)
+			if err == io.EOF {
+				break
 			}
-			break
+			return nil, err
 		}
 
 		ve := &manifest.VersionEdit{}
 		err = ve.Decode(r)
 		if err != nil {
-			fmt.Fprintf(w, "%s\n", err)
-			break
+			return nil, err
 		}
 		edits = append(edits, ve)
 
 		if ve.ComparerName != "" {
 			l.cmp = l.comparers[ve.ComparerName]
 			if l.cmp == nil {
-				fmt.Fprintf(w, "%d: unknown comparer %q\n", i, ve.ComparerName)
-				return nil
+				return nil, errors.Errorf("%d: unknown comparer %q", i, ve.ComparerName)
 			}
 			l.fmtKey.setForComparer(ve.ComparerName, l.comparers)
 		} else if l.cmp == nil {
@@ -237,7 +238,7 @@ func (l *lsmT) readManifest(path string) []*manifest.VersionEdit {
 			l.cmp.FormatKey = l.fmtKey.fn
 		}
 	}
-	return edits
+	return edits, nil
 }
 
 func (l *lsmT) buildKeys(edits []*manifest.VersionEdit) {
@@ -417,25 +418,19 @@ func (l *lsmT) reason(ve *manifest.VersionEdit) string {
 	return "added"
 }
 
-func (l *lsmT) formatJSON(v interface{}) string {
+func (l *lsmT) formatJSON(v interface{}) (string, error) {
 	if l.pretty {
 		return l.prettyJSON(v)
 	}
 	return l.uglyJSON(v)
 }
 
-func (l *lsmT) uglyJSON(v interface{}) string {
+func (l *lsmT) uglyJSON(v interface{}) (string, error) {
 	data, err := json.Marshal(v)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return string(data)
+	return string(data), err
 }
 
-func (l *lsmT) prettyJSON(v interface{}) string {
+func (l *lsmT) prettyJSON(v interface{}) (string, error) {
 	data, err := json.MarshalIndent(v, "", "\t")
-	if err != nil {
-		log.Fatal(err)
-	}
-	return string(data)
+	return string(data), err
 }

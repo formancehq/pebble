@@ -38,31 +38,28 @@ const maxIOSize = 1024 * 1024
 // The workload is random IO, with various IO sizes. The main goal of the
 // benchmark is to establish the relationship between IO size and latency,
 // especially against shared object storage.
-func (d *dbT) runIOBench(cmd *cobra.Command, args []string) {
+func (d *dbT) runIOBench(cmd *cobra.Command, args []string) (retErr error) {
 	stdout := cmd.OutOrStdout()
 
 	ioSizes, err := parseIOSizes(d.ioSizes)
 	if err != nil {
-		fmt.Fprintf(stdout, "error parsing io-sizes: %s\n", err)
-		return
+		return errors.Wrap(err, "error parsing io-sizes")
 	}
 
 	db, err := d.openDB(args[0])
 	if err != nil {
-		fmt.Fprintf(stdout, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stdout, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 
 	readables, err := d.openBenchTables(db)
 	if err != nil {
-		fmt.Fprintf(stdout, "%s\n", err)
-		return
+		return err
 	}
 
 	defer func() {
 		for _, r := range readables {
-			_ = r.Close()
+			retErr = errors.CombineErrors(retErr, r.Close())
 		}
 	}()
 
@@ -75,6 +72,7 @@ func (d *dbT) runIOBench(cmd *cobra.Command, args []string) {
 	fmt.Fprintf(stdout, "IO count: %d  Parallelism: %d  Levels: %s\n", d.ioCount, d.ioParallelism, levels)
 
 	var wg sync.WaitGroup
+	workerErrors := make(chan error, d.ioParallelism)
 	wg.Add(d.ioParallelism)
 	remainingIOs := ios
 	for i := 0; i < d.ioParallelism; i++ {
@@ -85,12 +83,20 @@ func (d *dbT) runIOBench(cmd *cobra.Command, args []string) {
 		go func(workerIdx int, ios []benchIO) {
 			defer wg.Done()
 			if err := performIOs(readables, ios); err != nil {
-				fmt.Fprintf(stdout, "worker %d encountered error: %v", workerIdx, err)
+				workerErrors <- errors.Wrapf(err, "worker %d encountered error", workerIdx)
 			}
 		}(i, remainingIOs[:n])
 		remainingIOs = remainingIOs[n:]
 	}
 	wg.Wait()
+	close(workerErrors)
+	var benchErr error
+	for err := range workerErrors {
+		benchErr = errors.CombineErrors(benchErr, err)
+	}
+	if benchErr != nil {
+		return benchErr
+	}
 
 	elapsed := make([]time.Duration, d.ioCount)
 	for _, ioSize := range ioSizes {
@@ -102,6 +108,7 @@ func (d *dbT) runIOBench(cmd *cobra.Command, args []string) {
 		}
 		fmt.Fprintf(stdout, "%4dKB  --  %s\n", ioSize/1024, getStats(elapsed))
 	}
+	return nil
 }
 
 // genBenchIOs generates <count> IOs for each given size. All IOs (across all
@@ -202,12 +209,17 @@ func (d *dbT) openBenchTables(db *pebble.DB) ([]objstorage.Readable, error) {
 		r, err := p.OpenForReading(context.Background(), base.FileTypeTable, n, objstorage.OpenOptions{})
 		if err != nil {
 			for _, r := range res {
-				_ = r.Close()
+				err = errors.CombineErrors(err, r.Close())
 			}
 			return nil, err
 		}
 		if r.Size() < maxIOSize {
-			_ = r.Close()
+			if err := r.Close(); err != nil {
+				for _, opened := range res {
+					err = errors.CombineErrors(err, opened.Close())
+				}
+				return nil, err
+			}
 			continue
 		}
 		res = append(res, r)
@@ -244,7 +256,7 @@ func parseIOSizes(sizes string) ([]int, error) {
 }
 
 // performIOs performs the given list of IOs and populates the elapsed fields.
-func performIOs(readables []objstorage.Readable, ios []benchIO) error {
+func performIOs(readables []objstorage.Readable, ios []benchIO) (retErr error) {
 	ctx := context.Background()
 	rh := make([]objstorage.ReadHandle, len(readables))
 	for i := range rh {
@@ -252,7 +264,7 @@ func performIOs(readables []objstorage.Readable, ios []benchIO) error {
 	}
 	defer func() {
 		for i := range rh {
-			_ = rh[i].Close()
+			retErr = errors.CombineErrors(retErr, rh[i].Close())
 		}
 	}()
 

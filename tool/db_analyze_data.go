@@ -32,7 +32,7 @@ import (
 // Minimum samples required per analyzer bucket to report the bucket at all.
 const minSamples = 10
 
-func (d *dbT) runAnalyzeData(cmd *cobra.Command, args []string) {
+func (d *dbT) runAnalyzeData(cmd *cobra.Command, args []string) error {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
 	isTTY := isTTY(stdout)
 
@@ -42,13 +42,11 @@ func (d *dbT) runAnalyzeData(cmd *cobra.Command, args []string) {
 	var isRemote bool
 	if strings.Contains(dir, "://") {
 		if d.remoteStorageFn == nil {
-			fmt.Fprintf(stderr, "path looks like remote storage, but remote storage not configuered.\n")
-			return
+			return errors.New("path looks like remote storage, but remote storage not configured")
 		}
 		remoteStorageImpl, err := d.remoteStorageFn(dir)
 		if err != nil {
-			fmt.Fprintf(stderr, "error initializing remote storage: %s\n", err)
-			return
+			return errors.Wrap(err, "initializing remote storage")
 		}
 		dbStorage = newRemoteStorage(remoteStorageImpl)
 		isRemote = true
@@ -61,13 +59,11 @@ func (d *dbT) runAnalyzeData(cmd *cobra.Command, args []string) {
 	}
 	files, err := makeFileSet(dbStorage, rng)
 	if err != nil {
-		fmt.Fprintf(stderr, "error loading file list: %s\n", err)
-		return
+		return errors.Wrap(err, "loading file list")
 	}
 	numFiles, totalSize := files.Remaining()
 	if numFiles == 0 {
-		fmt.Fprintf(stderr, "no sstables found\n")
-		return
+		return errors.New("no sstables found")
 	}
 	var readLimiter *tokenbucket.TokenBucket
 	if d.analyzeData.readMBPerSec > 0 {
@@ -142,16 +138,14 @@ func (d *dbT) runAnalyzeData(cmd *cobra.Command, args []string) {
 					humanize.Count.Int64(int64(sampledFiles)), humanize.Bytes.Int64(sampledBytes), percentage)
 			}
 			if err := analyzeSaveCSVFile(analyzer, d.analyzeData.outputCSVFile); err != nil {
-				fmt.Fprintf(stderr, "error writing CSV file: %s\n", err)
-				return
+				return errors.Wrap(err, "writing CSV file")
 			}
 			if shouldStop {
-				return
+				return nil
 			}
 			if !isRemote {
 				if err := files.Refresh(); err != nil {
-					fmt.Fprintf(stderr, "error loading file list: %s\n", err)
-					return
+					return errors.Wrap(err, "loading file list")
 				}
 			}
 			lastReportTime = time.Now()
@@ -228,8 +222,7 @@ func (l *vfsStorage) Open(name string) (objstorage.Readable, error) {
 	}
 	readable, err := objstorageprovider.NewFileReadable(file, l.fs, objstorageprovider.NewReadaheadConfig(), path)
 	if err != nil {
-		_ = file.Close()
-		return nil, err
+		return nil, errors.CombineErrors(err, file.Close())
 	}
 	return readable, nil
 }

@@ -222,6 +222,7 @@ L6:
   000001:[#0,DEL-#0,DEL] seqnums:[2-5] points:[#0,DEL-#0,DEL]
 Version edit that failed
   added: L6 000002:0<#1-#4>[#0,DEL-#0,DEL]
+manifest check failed
 
 manifest dump
 ./testdata/find-db/MANIFEST-000001

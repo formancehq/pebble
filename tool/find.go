@@ -110,7 +110,7 @@ key. This includes references to the key in WAL files and sstables, and the
 provenance of the sstables (flushed, ingested, compacted).
 `,
 		Args: cobra.ExactArgs(2),
-		Run:  f.run,
+		RunE: f.run,
 	}
 
 	f.Root.Flags().BoolVarP(
@@ -126,31 +126,31 @@ provenance of the sstables (flushed, ingested, compacted).
 	return f
 }
 
-func (f *findT) run(cmd *cobra.Command, args []string) {
+func (f *findT) run(cmd *cobra.Command, args []string) (retErr error) {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
+	f.errors = nil
+	f.edits = nil
 	var key key
 	if err := key.Set(args[1]); err != nil {
-		fmt.Fprintf(stdout, "%s\n", err)
-		return
+		return err
 	}
 
 	if err := f.findFiles(stdout, stderr, args[0]); err != nil {
-		fmt.Fprintf(stdout, "%s\n", err)
-		return
+		return err
 	}
-	f.readManifests(stdout)
+	if err := f.readManifests(stdout); err != nil {
+		return err
+	}
 	var err error
 	f.blobMappings, err = newBlobFileMappings(stderr, f.opts.FS, args[0], f.manifests)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer func() { _ = f.blobMappings.Close() }()
+	defer func() { retErr = errors.CombineErrors(retErr, f.blobMappings.Close()) }()
 
 	f.opts.Comparer = f.comparers[f.comparerName]
 	if f.opts.Comparer == nil {
-		fmt.Fprintf(stderr, "unknown comparer %q", f.comparerName)
-		return
+		return errors.Errorf("unknown comparer %q", f.comparerName)
 	}
 	f.fmtKey.setForComparer(f.opts.Comparer.Name, f.comparers)
 	f.fmtValue.setForComparer(f.opts.Comparer.Name, f.comparers)
@@ -177,9 +177,10 @@ func (f *findT) run(cmd *cobra.Command, args []string) {
 		formatKeyValue(stdout, f.fmtKey, f.fmtValue, &r.key, r.value)
 	}
 
-	for _, errorMsg := range f.errors {
-		fmt.Fprint(stdout, errorMsg)
+	if len(f.errors) > 0 {
+		return errors.New(f.errors[0])
 	}
+	return nil
 }
 
 // Find all of the manifests, logs, and tables in the specified directory.
@@ -195,17 +196,16 @@ func (f *findT) findFiles(stdout, stderr io.Writer, dir string) error {
 	}
 
 	var walAccumulator wal.FileAccumulator
-	walk(stderr, f.opts.FS, dir, func(path string) {
+	if err := walkFiles(f.opts.FS, dir, func(path string) error {
 		if isLogFile, err := walAccumulator.MaybeAccumulate(f.opts.FS, path); err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", path, err)
-			return
+			return errors.Wrapf(err, "%s", path)
 		} else if isLogFile {
-			return
+			return nil
 		}
 
 		ft, fileNum, ok := base.ParseFilename(f.opts.FS, path)
 		if !ok {
-			return
+			return nil
 		}
 		fl := fileLoc{DiskFileNum: fileNum, path: path}
 		switch ft {
@@ -214,9 +214,12 @@ func (f *findT) findFiles(stdout, stderr io.Writer, dir string) error {
 		case base.FileTypeTable:
 			f.tables = append(f.tables, fl)
 		default:
-			return
+			return nil
 		}
-	})
+		return nil
+	}); err != nil {
+		return err
+	}
 
 	// TODO(jackson): Provide a means of scanning the secondary WAL directory
 	// too.
@@ -236,15 +239,14 @@ func (f *findT) findFiles(stdout, stderr io.Writer, dir string) error {
 
 // Read the manifests and populate the editRefs map which is used to determine
 // the provenance and metadata of tables.
-func (f *findT) readManifests(stdout io.Writer) {
+func (f *findT) readManifests(stdout io.Writer) error {
 	for _, fl := range f.manifests {
-		func() {
+		if err := func() (retErr error) {
 			mf, err := f.opts.FS.Open(fl.path)
 			if err != nil {
-				fmt.Fprintf(stdout, "%s\n", err)
-				return
+				return err
 			}
-			defer mf.Close()
+			defer func() { retErr = errors.CombineErrors(retErr, mf.Close()) }()
 
 			if f.verbose {
 				fmt.Fprintf(stdout, "%s\n", fl.path)
@@ -254,15 +256,15 @@ func (f *findT) readManifests(stdout io.Writer) {
 			for {
 				r, err := rr.Next()
 				if err != nil {
-					if err != io.EOF {
-						fmt.Fprintf(stdout, "%s: %s\n", fl.path, err)
+					if err == io.EOF {
+						break
 					}
-					break
+					return errors.Wrapf(err, "%s", fl.path)
 				}
 
 				var ve manifest.VersionEdit
 				if err := ve.Decode(r); err != nil {
-					fmt.Fprintf(stdout, "%s: %s\n", fl.path, err)
+					return errors.Wrapf(err, "%s", fl.path)
 					break
 				}
 				i := len(f.edits)
@@ -292,12 +294,16 @@ func (f *findT) readManifests(stdout io.Writer) {
 					}
 				}
 			}
-		}()
+			return nil
+		}(); err != nil {
+			return err
+		}
 	}
 
 	if f.verbose {
 		fmt.Fprintf(stdout, "%5d %s\n", len(f.edits), makePlural("edit", int64(len(f.edits))))
 	}
+	return nil
 }
 
 // Search the logs and sstables for references to the specified key.
@@ -332,7 +338,7 @@ func (f *findT) search(stdout io.Writer, key []byte) []findRef {
 func (f *findT) searchLogs(stdout io.Writer, searchKey []byte, refs []findRef) []findRef {
 	cmp := f.opts.Comparer.Compare
 	for _, ll := range f.logs {
-		_ = func() (err error) {
+		searchErr := func() (err error) {
 			rr := ll.OpenForRead()
 			if f.verbose {
 				fmt.Fprintf(stdout, "%s", ll)
@@ -374,6 +380,7 @@ func (f *findT) searchLogs(stdout io.Writer, searchKey []byte, refs []findRef) [
 				b = pebble.Batch{}
 				if err := b.SetRepr(buf.Bytes()); err != nil {
 					fmt.Fprintf(stdout, "%s: corrupt log file: %v", ll, err)
+					f.errors = append(f.errors, fmt.Sprintf("%s: corrupt log file: %v", ll, err))
 					continue
 				}
 				seqNum := b.SeqNum()
@@ -382,6 +389,7 @@ func (f *findT) searchLogs(stdout io.Writer, searchKey []byte, refs []findRef) [
 					if !ok {
 						if err != nil {
 							fmt.Fprintf(stdout, "%s: corrupt log file: %v", ll, err)
+							f.errors = append(f.errors, fmt.Sprintf("%s: corrupt log file: %v", ll, err))
 							break
 						}
 						break
@@ -416,6 +424,9 @@ func (f *findT) searchLogs(stdout io.Writer, searchKey []byte, refs []findRef) [
 				}
 			}
 		}()
+		if searchErr != nil && searchErr != io.EOF && searchErr != record.ErrZeroedChunk && searchErr != record.ErrInvalidChunk {
+			f.errors = append(f.errors, fmt.Sprintf("%s: %v", ll, searchErr))
+		}
 	}
 	return refs
 }
@@ -429,7 +440,7 @@ func (f *findT) searchTables(stdout io.Writer, searchKey []byte, refs []findRef)
 
 	f.tableRefs = make(map[base.FileNum]bool)
 	for _, fl := range f.tables {
-		_ = func() (err error) {
+		searchErr := func() (err error) {
 			tf, err := f.opts.FS.Open(fl.path)
 			if err != nil {
 				fmt.Fprintf(stdout, "%s\n", err)
@@ -474,7 +485,7 @@ func (f *findT) searchTables(stdout io.Writer, searchKey []byte, refs []findRef)
 				err = nil
 				return
 			}
-			defer func() { _ = r.Close() }()
+			defer func() { err = errors.CombineErrors(err, r.Close()) }()
 
 			var transforms sstable.IterTransforms
 			var fragTransforms sstable.FragmentIterTransforms
@@ -581,6 +592,9 @@ func (f *findT) searchTables(stdout io.Writer, searchKey []byte, refs []findRef)
 			}
 			return nil
 		}()
+		if searchErr != nil {
+			f.errors = append(f.errors, fmt.Sprintf("%s: %v", fl.path, searchErr))
+		}
 	}
 	return refs
 }
