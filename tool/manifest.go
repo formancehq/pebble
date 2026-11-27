@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/HdrHistogram/hdrhistogram-go"
+	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/internal/base"
 	"github.com/cockroachdb/pebble/v2/internal/binfmt"
@@ -63,7 +64,7 @@ func newManifest(opts *pebble.Options, comparers sstable.Comparers) *manifestT {
 Print the contents of the MANIFEST files.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  m.runDump,
+		RunE: m.runDump,
 	}
 	m.Dump.Flags().Var(&m.fmtKey, "key", "key formatter")
 	m.Dump.Flags().Var(&m.filterStart, "filter-start", "start key filters out all version edits that only reference sstables containing keys strictly before the given key")
@@ -79,7 +80,7 @@ Print the contents of the MANIFEST files.
 Summarize the edits to the MANIFEST files over time.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  m.runSummarize,
+		RunE: m.runSummarize,
 	}
 	m.Root.AddCommand(m.Summarize)
 	m.Summarize.Flags().DurationVar(
@@ -93,7 +94,7 @@ Summarize the edits to the MANIFEST files over time.
 Check the contents of the MANIFEST files.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  m.runCheck,
+		RunE: m.runCheck,
 	}
 	m.Root.AddCommand(m.Check)
 	m.Check.Flags().Var(
@@ -102,16 +103,15 @@ Check the contents of the MANIFEST files.
 	return m
 }
 
-func (m *manifestT) runDump(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
+func (m *manifestT) runDump(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
 	for _, arg := range args {
-		func() {
+		if err := func() (retErr error) {
 			f, err := m.opts.FS.Open(arg)
 			if err != nil {
-				fmt.Fprintf(stderr, "%s\n", err)
-				return
+				return err
 			}
-			defer f.Close()
+			defer func() { retErr = errors.CombineErrors(retErr, f.Close()) }()
 
 			fmt.Fprintf(stdout, "%s\n", arg)
 
@@ -124,16 +124,18 @@ func (m *manifestT) runDump(cmd *cobra.Command, args []string) {
 				offset := rr.Offset()
 				r, err := rr.Next()
 				if err != nil {
-					fmt.Fprintf(stdout, "%s\n", err)
-					break
+					if err == io.EOF {
+						fmt.Fprintln(stdout, err)
+						break
+					}
+					return err
 				}
 				fmt.Fprintf(stdout, "%d/%d\n", offset, editIdx)
 				// If verbose, dump the binary encoding of the version edit.
 				if m.verbose {
 					data, err := io.ReadAll(r)
 					if err != nil {
-						fmt.Fprintf(stdout, "%s\n", err)
-						break
+						return err
 					}
 					r = bytes.NewReader(data)
 					binfmt.FHexDump(stdout, data, 16, true)
@@ -142,12 +144,10 @@ func (m *manifestT) runDump(cmd *cobra.Command, args []string) {
 				var ve manifest.VersionEdit
 				err = ve.Decode(r)
 				if err != nil {
-					fmt.Fprintf(stdout, "%s\n", err)
-					break
+					return err
 				}
 				if err := bve.Accumulate(&ve); err != nil {
-					fmt.Fprintf(stdout, "%s\n", err)
-					break
+					return err
 				}
 
 				if comparer != nil && !anyOverlap(comparer.Compare, &ve, m.filterStart, m.filterEnd) {
@@ -157,7 +157,7 @@ func (m *manifestT) runDump(cmd *cobra.Command, args []string) {
 				if ve.ComparerName != "" {
 					comparer = m.comparers[ve.ComparerName]
 					if comparer == nil {
-						fmt.Fprintf(stderr, " comparer %q unknown\n", ve.ComparerName)
+						return fmt.Errorf("comparer %q unknown", ve.ComparerName)
 					}
 					m.fmtKey.setForComparer(ve.ComparerName, m.comparers)
 				}
@@ -171,14 +171,17 @@ func (m *manifestT) runDump(cmd *cobra.Command, args []string) {
 				emptyVersion := manifest.NewInitialVersion(comparer)
 				v, err := bve.Apply(emptyVersion, m.opts.Experimental.ReadCompactionRate)
 				if err != nil {
-					fmt.Fprintf(stdout, "%s\n", err)
-					return
+					return err
 				}
 				l0Organizer.PerformUpdate(l0Organizer.PrepareUpdate(&bve, v), v)
 				fmt.Fprint(stdout, v.DebugStringFormatKey(m.fmtKey.fn))
 			}
-		}()
+			return nil
+		}(); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func anyOverlap(cmp base.Compare, ve *manifest.VersionEdit, start, end key) bool {
@@ -215,21 +218,22 @@ func anyOverlapFile(cmp base.Compare, f *manifest.TableMetadata, start, end key)
 	return true
 }
 
-func (m *manifestT) runSummarize(cmd *cobra.Command, args []string) {
+func (m *manifestT) runSummarize(cmd *cobra.Command, args []string) error {
 	for _, arg := range args {
 		err := m.runSummarizeOne(cmd.OutOrStdout(), arg)
 		if err != nil {
-			fmt.Fprintf(cmd.OutOrStderr(), "%s\n", err)
+			return err
 		}
 	}
+	return nil
 }
 
-func (m *manifestT) runSummarizeOne(stdout io.Writer, arg string) error {
+func (m *manifestT) runSummarizeOne(stdout io.Writer, arg string) (retErr error) {
 	f, err := m.opts.FS.Open(arg)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { retErr = errors.CombineErrors(retErr, f.Close()) }()
 	fmt.Fprintf(stdout, "%s\n", arg)
 
 	type summaryBucket struct {
@@ -483,14 +487,15 @@ func (m *manifestT) runSummarizeOne(stdout io.Writer, arg string) error {
 	return nil
 }
 
-func (m *manifestT) runCheck(cmd *cobra.Command, args []string) {
+func (m *manifestT) runCheck(cmd *cobra.Command, args []string) error {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
 	ok := true
+	var checkErr error
 	for _, arg := range args {
 		func() {
 			f, err := m.opts.FS.Open(arg)
 			if err != nil {
-				fmt.Fprintf(stderr, "%s\n", err)
+				checkErr = errors.CombineErrors(checkErr, err)
 				ok = false
 				return
 			}
@@ -575,20 +580,28 @@ func (m *manifestT) runCheck(cmd *cobra.Command, args []string) {
 			}
 		}()
 	}
-	if ok {
-		fmt.Fprintf(stdout, "OK\n")
+	if !ok {
+		if checkErr != nil {
+			return checkErr
+		}
+		return fmt.Errorf("manifest check failed")
 	}
+	fmt.Fprintf(stdout, "OK\n")
+	return nil
 }
 
 func findManifests(stderr io.Writer, fs vfs.FS, dir string) ([]fileLoc, error) {
 	var manifests []fileLoc
-	walk(stderr, fs, dir, func(path string) {
+	if err := walkFiles(fs, dir, func(path string) error {
 		ft, fileNum, ok := base.ParseFilename(fs, path)
 		if !ok || ft != base.FileTypeManifest {
-			return
+			return nil
 		}
 		manifests = append(manifests, fileLoc{DiskFileNum: fileNum, path: path})
-	})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	slices.SortFunc(manifests, cmpFileLoc)
 	return manifests, nil
 }

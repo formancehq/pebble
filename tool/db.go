@@ -118,7 +118,7 @@ Verify sstable, manifest, and WAL checksums. Requires that the specified
 database not be in use by another process.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runCheck,
+		RunE: d.runCheck,
 	}
 	d.Upgrade = &cobra.Command{
 		Use:   "upgrade <dir>",
@@ -129,7 +129,7 @@ It is recommended to make a backup copy of the DB directory before upgrading.
 Requires that the specified database not be in use by another process.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runUpgrade,
+		RunE: d.runUpgrade,
 	}
 	d.Checkpoint = &cobra.Command{
 		Use:   "checkpoint <src-dir> <dest-dir>",
@@ -140,7 +140,7 @@ is a point-in-time snapshot of DB state. Requires that the specified
 database not be in use by another process.
 `,
 		Args: cobra.ExactArgs(2),
-		Run:  d.runCheckpoint,
+		RunE: d.runCheckpoint,
 	}
 	d.Get = &cobra.Command{
 		Use:   "get <dir> <key>",
@@ -151,7 +151,7 @@ does not exist. Requires that the specified database not be in use by another
 process.
 `,
 		Args: cobra.ExactArgs(2),
-		Run:  d.runGet,
+		RunE: d.runGet,
 	}
 	d.Logs = logs.NewCmd()
 	d.LSM = &cobra.Command{
@@ -162,7 +162,7 @@ Print the structure of the LSM tree. Requires that the specified database not
 be in use by another process.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runLSM,
+		RunE: d.runLSM,
 	}
 	d.Properties = &cobra.Command{
 		Use:   "properties <dir>",
@@ -171,7 +171,7 @@ be in use by another process.
 Print SSTable properties, aggregated per level of the LSM.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runProperties,
+		RunE: d.runProperties,
 	}
 	d.Scan = &cobra.Command{
 		Use:   "scan <dir>",
@@ -181,7 +181,7 @@ Print the records in the DB. Requires that the specified database not be in use
 by another process.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runScan,
+		RunE: d.runScan,
 	}
 	d.Set = &cobra.Command{
 		Use:   "set <dir> <key> <value>",
@@ -191,7 +191,7 @@ Adds a new key/value to the DB. Requires that the specified database
 not be in use by another process.
 `,
 		Args: cobra.ExactArgs(3),
-		Run:  d.runSet,
+		RunE: d.runSet,
 	}
 	d.Space = &cobra.Command{
 		Use:   "space <dir>",
@@ -202,7 +202,7 @@ specified by --start and --end. Requires that the specified database not be in
 use by another process.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runSpace,
+		RunE: d.runSpace,
 	}
 	d.Excise = &cobra.Command{
 		Use:   "excise <dir>",
@@ -212,7 +212,7 @@ Excise a key range, removing all SSTs inside the range and virtualizing any SSTs
 that partially overlap the range.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runExcise,
+		RunE: d.runExcise,
 	}
 	d.IOBench = &cobra.Command{
 		Use:   "io-bench <dir>",
@@ -222,7 +222,7 @@ Run a random IO workload with various IO sizes against the sstables in the
 specified database.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runIOBench,
+		RunE: d.runIOBench,
 	}
 	d.AnalyzeData = &cobra.Command{
 		Use:   "analyze-data <dir>",
@@ -232,7 +232,7 @@ Sample blocks from the files in the database directory to run compression
 experiments and produce a CSV file of the results.
 `,
 		Args: cobra.ExactArgs(1),
-		Run:  d.runAnalyzeData,
+		RunE: d.runAnalyzeData,
 	}
 
 	d.Root.AddCommand(d.Check, d.Upgrade, d.Checkpoint, d.Get, d.Logs, d.LSM, d.Properties, d.Scan, d.Set, d.Space, d.Excise, d.IOBench, d.AnalyzeData)
@@ -360,12 +360,12 @@ func (d *dbT) loadOptions(dir string) error {
 		}
 		switch ft {
 		case base.FileTypeOptions:
-			err := func() error {
+			err := func() (retErr error) {
 				f, err := d.opts.FS.Open(d.opts.FS.PathJoin(dir, filename))
 				if err != nil {
 					return err
 				}
-				defer f.Close()
+				defer func() { retErr = errors.CombineErrors(retErr, f.Close()) }()
 
 				data, err := io.ReadAll(f)
 				if err != nil {
@@ -425,43 +425,36 @@ func (d *dbT) openDBInternal(dir string, openOptions ...OpenOption) (*pebble.DB,
 	return pebble.Open(dir, &opts)
 }
 
-func (d *dbT) closeDB(stderr io.Writer, db *pebble.DB) {
-	if err := db.Close(); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-	}
-}
-
-func (d *dbT) runCheck(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+func (d *dbT) runCheck(cmd *cobra.Command, args []string) (retErr error) {
+	stdout := cmd.OutOrStdout()
 	db, err := d.openDB(args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stderr, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 
 	var stats pebble.CheckLevelsStats
 	if err := db.CheckLevels(&stats); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
+		return err
 	}
 	fmt.Fprintf(stdout, "checked %d %s and %d %s\n",
 		stats.NumPoints, makePlural("point", stats.NumPoints), stats.NumTombstones, makePlural("tombstone", int64(stats.NumTombstones)))
+	return nil
 }
 
-func (d *dbT) runUpgrade(cmd *cobra.Command, args []string) {
+func (d *dbT) runUpgrade(cmd *cobra.Command, args []string) (retErr error) {
 	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
 	db, err := d.openDB(args[0], nonReadOnly{})
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stderr, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 
 	targetVersion := pebble.FormatNewest
 	current := db.FormatMajorVersion()
 	if current >= targetVersion {
 		fmt.Fprintf(stdout, "DB is already at internal version %d.\n", current)
-		return
+		return nil
 	}
 	fmt.Fprintf(stdout, "Upgrading DB from internal version %d to %d.\n", current, targetVersion)
 
@@ -478,48 +471,46 @@ through a custom binary that configures them. Otherwise, any new tables created
 during upgrade will not have the relevant block properties.
 `
 	}
-	if !d.promptForConfirmation(prompt, cmd.InOrStdin(), stdout, stderr) {
-		return
+	confirmed, err := d.promptForConfirmation(prompt, cmd.InOrStdin(), stdout, stderr)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return nil
 	}
 	if err := db.RatchetFormatMajorVersion(targetVersion); err != nil {
-		fmt.Fprintf(stderr, "error: %s\n", err)
+		return errors.Wrap(err, "error upgrading database")
 	}
 	fmt.Fprintf(stdout, "Upgrade complete.\n")
+	return nil
 }
 
-func (d *dbT) runCheckpoint(cmd *cobra.Command, args []string) {
-	stderr := cmd.ErrOrStderr()
+func (d *dbT) runCheckpoint(cmd *cobra.Command, args []string) (retErr error) {
 	db, err := d.openDB(args[0], nonReadOnly{})
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stderr, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 	destDir := args[1]
 
-	if err := db.Checkpoint(destDir); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-	}
+	return db.Checkpoint(destDir)
 }
 
-func (d *dbT) runGet(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+func (d *dbT) runGet(cmd *cobra.Command, args []string) (retErr error) {
+	stdout := cmd.OutOrStdout()
 	db, err := d.openDB(args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stderr, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 	var k key
 	if err := k.Set(args[1]); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
 
 	val, closer, err := db.Get(k)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
 	defer func() {
 		if closer != nil {
@@ -529,31 +520,31 @@ func (d *dbT) runGet(cmd *cobra.Command, args []string) {
 	if val != nil {
 		fmt.Fprintf(stdout, "%s\n", d.fmtValue.fn(k, val))
 	}
+	return nil
 }
 
-func (d *dbT) runLSM(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+func (d *dbT) runLSM(cmd *cobra.Command, args []string) (retErr error) {
+	stdout := cmd.OutOrStdout()
 	db, err := d.openDB(args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stderr, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 
 	fmt.Fprintf(stdout, "%s", db.Metrics())
 	if d.lsmURL {
 		fmt.Fprintf(stdout, "\nLSM viewer: %s\n", db.LSMViewURL())
 	}
+	return nil
 }
 
-func (d *dbT) runScan(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+func (d *dbT) runScan(cmd *cobra.Command, args []string) (retErr error) {
+	stdout := cmd.OutOrStdout()
 	db, err := d.openDB(args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stderr, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 
 	// Update the internal formatter if this comparator has one specified.
 	if d.opts.Comparer != nil {
@@ -566,9 +557,12 @@ func (d *dbT) runScan(cmd *cobra.Command, args []string) {
 	fmtValues := d.fmtValue.spec != "null"
 	var count int64
 
-	iter, _ := db.NewIter(&pebble.IterOptions{
+	iter, err := db.NewIter(&pebble.IterOptions{
 		UpperBound: d.end,
 	})
+	if err != nil {
+		return err
+	}
 	var valid bool
 	if len(d.start) == 0 {
 		valid = iter.First()
@@ -598,30 +592,30 @@ func (d *dbT) runScan(cmd *cobra.Command, args []string) {
 	}
 
 	if err := iter.Close(); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
+		return err
 	}
 
 	elapsed := timeNow().Sub(start)
 
 	fmt.Fprintf(stdout, "scanned %d %s in %0.1fs\n",
 		count, makePlural("record", count), elapsed.Seconds())
+	return nil
 }
 
-func (d *dbT) runSpace(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+func (d *dbT) runSpace(cmd *cobra.Command, args []string) (retErr error) {
+	stdout := cmd.OutOrStdout()
 	db, err := d.openDB(args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stdout, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 
 	bytes, err := db.EstimateDiskUsage(d.start, d.end)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
 	fmt.Fprintf(stdout, "%d\n", bytes)
+	return nil
 }
 
 func (d *dbT) getExciseSpan() (pebble.KeyRange, error) {
@@ -649,13 +643,12 @@ func (d *dbT) getExciseSpan() (pebble.KeyRange, error) {
 	}, nil
 }
 
-func (d *dbT) runExcise(cmd *cobra.Command, args []string) {
+func (d *dbT) runExcise(cmd *cobra.Command, args []string) (retErr error) {
 	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
 
 	span, err := d.getExciseSpan()
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
-		return
+		return err
 	}
 
 	d.opts.EnsureDefaults()
@@ -669,10 +662,9 @@ func (d *dbT) runExcise(cmd *cobra.Command, args []string) {
 	dbDir := args[0]
 	db, err := d.openDB(dbDir, nonReadOnly{})
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stdout, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 
 	// Update the internal formatter if this comparator has one specified.
 	if d.opts.Comparer != nil {
@@ -685,8 +677,12 @@ func (d *dbT) runExcise(cmd *cobra.Command, args []string) {
 
 	prompt := `WARNING!!!
 This command will remove all keys in this range!`
-	if !d.promptForConfirmation(prompt, cmd.InOrStdin(), stdout, stderr) {
-		return
+	confirmed, err := d.promptForConfirmation(prompt, cmd.InOrStdin(), stdout, stderr)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return nil
 	}
 
 	// Write a temporary sst that only has excise tombstones. We write it inside
@@ -696,8 +692,7 @@ This command will remove all keys in this range!`
 	defer func() { _ = dbOpts.FS.Remove(path) }()
 	f, err := dbOpts.FS.Create(path, vfs.WriteCategoryUnspecified)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error creating temporary sst file %q: %s\n", path, err)
-		return
+		return errors.Wrapf(err, "creating temporary sst file %q", path)
 	}
 	writable := objstorageprovider.NewFileWritable(f)
 	writerOpts := dbOpts.MakeWriterOptions(0, db.TableFormat())
@@ -706,22 +701,21 @@ This command will remove all keys in this range!`
 	err = errors.CombineErrors(err, w.RangeKeyDelete(span.Start, span.End))
 	err = errors.CombineErrors(err, w.Close())
 	if err != nil {
-		fmt.Fprintf(stderr, "Error writing temporary sst file %q: %s\n", path, err)
-		return
+		return errors.Wrapf(err, "writing temporary sst file %q", path)
 	}
 
 	_, err = db.IngestAndExcise(context.Background(), []string{path}, nil, nil, span)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error excising: %s\n", err)
-		return
+		return errors.Wrap(err, "excising")
 	}
 	fmt.Fprintf(stdout, "Excise complete.\n")
+	return nil
 }
 
-func (d *dbT) runProperties(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+func (d *dbT) runProperties(cmd *cobra.Command, args []string) (retErr error) {
+	stdout := cmd.OutOrStdout()
 	dirname := args[0]
-	err := func() error {
+	err := func() (retErr error) {
 		desc, err := pebble.Peek(dirname, d.opts.FS)
 		if err != nil {
 			return err
@@ -735,7 +729,7 @@ func (d *dbT) runProperties(cmd *cobra.Command, args []string) {
 		if err != nil {
 			return errors.Wrapf(err, "pebble: could not open MANIFEST file %q", manifestFilename)
 		}
-		defer f.Close()
+		defer func() { retErr = errors.CombineErrors(retErr, f.Close()) }()
 
 		cmp := base.DefaultComparer
 		var bve manifest.BulkVersionEdit
@@ -775,7 +769,7 @@ func (d *dbT) runProperties(cmd *cobra.Command, args []string) {
 		if err != nil {
 			return err
 		}
-		defer func() { _ = objProvider.Close() }()
+		defer func() { retErr = errors.CombineErrors(retErr, objProvider.Close()) }()
 
 		// Load and aggregate sstable properties.
 		tw := tabwriter.NewWriter(stdout, 2, 1, 4, ' ', 0)
@@ -866,61 +860,50 @@ func (d *dbT) runProperties(cmd *cobra.Command, args []string) {
 		}
 		return nil
 	}()
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-	}
+	return err
 }
 
-func (d *dbT) runSet(cmd *cobra.Command, args []string) {
-	stderr := cmd.ErrOrStderr()
+func (d *dbT) runSet(cmd *cobra.Command, args []string) (retErr error) {
 	db, err := d.openDB(args[0], nonReadOnly{})
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
-	defer d.closeDB(stderr, db)
+	defer func() { retErr = errors.CombineErrors(retErr, db.Close()) }()
 	var k, v key
 	if err := k.Set(args[1]); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
 	if err := v.Set(args[2]); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-		return
+		return err
 	}
 
-	if err := db.Set(k, v, nil); err != nil {
-		fmt.Fprintf(stderr, "%s\n", err)
-	}
+	return db.Set(k, v, nil)
 }
 
-func (d *dbT) promptForConfirmation(prompt string, stdin io.Reader, stdout, stderr io.Writer) bool {
+func (d *dbT) promptForConfirmation(prompt string, stdin io.Reader, stdout, stderr io.Writer) (bool, error) {
 	if d.bypassPrompt {
-		return true
+		return true, nil
 	}
 	if _, err := fmt.Fprintf(stdout, "%s\n", prompt); err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
-		return false
+		return false, err
 	}
 	reader := bufio.NewReader(stdin)
 	for {
 		if _, err := fmt.Fprintf(stdout, "Continue? [Y/N] "); err != nil {
-			fmt.Fprintf(stderr, "Error: %v\n", err)
-			return false
+			return false, err
 		}
 		answer, err := reader.ReadString('\n')
 		if err != nil {
-			fmt.Fprintf(stderr, "Error: %v\n", err)
-			return false
+			return false, err
 		}
 		answer = strings.ToLower(strings.TrimSpace(answer))
 		if answer == "y" || answer == "yes" {
-			return true
+			return true, nil
 		}
 
 		if answer == "n" || answer == "no" {
 			_, _ = fmt.Fprintf(stderr, "Aborting\n")
-			return false
+			return false, nil
 		}
 	}
 }

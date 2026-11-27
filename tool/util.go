@@ -320,27 +320,26 @@ func formatSpan(w io.Writer, fmtKey keyFormatter, fmtValue valueFormatter, s *ke
 	}
 }
 
-// walk calls fn for each file in dir and its subdirectories (or just on the
-// path if it is not a directory),
-func walk(stderr io.Writer, fs vfs.FS, path string, fn func(path string)) {
+// walkFiles visits each file under path in sorted order and propagates errors.
+func walkFiles(fs vfs.FS, path string, fn func(string) error) error {
 	info, err := fs.Stat(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", path, err)
-		return
+		return errors.Wrapf(err, "%s", path)
 	}
 	if !info.IsDir() {
-		fn(path)
-		return
+		return fn(path)
 	}
 	paths, err := fs.List(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", path, err)
-		return
+		return errors.Wrapf(err, "%s", path)
 	}
 	sort.Strings(paths)
 	for _, part := range paths {
-		walk(stderr, fs, fs.PathJoin(path, part), fn)
+		if err := walkFiles(fs, fs.PathJoin(path, part), fn); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // processFiles walks through the given arguments and processes files with
@@ -353,12 +352,11 @@ func processFiles[T any](
 	newReaderFn func(vfs.File, *cache.Handle, string) (T, error),
 	closeReaderFn func(T) error,
 	processFileFn func(string, T) error,
-) {
-	pathFn := func(path string) {
+) error {
+	pathFn := func(path string) (retErr error) {
 		f, err := fs.Open(path)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return errors.Wrapf(err, "%s", path)
 		}
 
 		// TODO(annie): Use a BufferPool.
@@ -369,25 +367,29 @@ func processFiles[T any](
 
 		r, err := newReaderFn(f, ch, path)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s: %s\n", path, err)
-			return
+			return errors.Wrapf(err, "%s", path)
 		}
 		defer func() {
-			_ = closeReaderFn(r)
+			retErr = errors.CombineErrors(retErr, closeReaderFn(r))
 		}()
-
 		if err := processFileFn(path, r); err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
+			return errors.Wrapf(err, "%s", path)
 		}
+		return nil
 	}
 
 	// Walk through args and process files with matching extensions.
 	for _, arg := range args {
-		walk(stderr, fs, arg, func(path string) {
+		walkErr := walkFiles(fs, arg, func(path string) error {
 			ext := filepath.Ext(path)
 			if slices.Contains(allowedExts, ext) {
-				pathFn(path)
+				return pathFn(path)
 			}
+			return nil
 		})
+		if walkErr != nil {
+			return walkErr
+		}
 	}
+	return nil
 }

@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"os"
 	"path"
 
 	"github.com/cockroachdb/errors"
@@ -59,7 +58,7 @@ func newWAL(opts *pebble.Options, comparers sstable.Comparers, defaultComparer s
 Print the contents of the WAL files.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  w.runDump,
+		RunE: w.runDump,
 	}
 	w.DumpMerged = &cobra.Command{
 		Use:   "dump-merged <wal-files>",
@@ -69,7 +68,7 @@ Print the merged contents of multiple WAL segment files that
 together form a single logical WAL.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  w.runDumpMerged,
+		RunE: w.runDumpMerged,
 	}
 
 	w.Root.AddCommand(w.Dump)
@@ -83,27 +82,18 @@ together form a single logical WAL.
 	return w
 }
 
-type errAndArg struct {
-	err error
-	arg string
-}
-
-func (w *walT) runDump(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
+func (w *walT) runDump(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
 	w.fmtKey.setForComparer(w.defaultComparer, w.comparers)
 	w.fmtValue.setForComparer(w.defaultComparer, w.comparers)
-	var errs []errAndArg
+	var errs []error
 	logErr := func(arg string, offset int64, err error) {
 		err = errors.Wrapf(err, "%s: offset %d: ", arg, offset)
-		fmt.Fprintf(stderr, "%s\n", err)
-		errs = append(errs, errAndArg{
-			arg: arg,
-			err: err,
-		})
+		errs = append(errs, err)
 	}
 
 	for _, arg := range args {
-		func() {
+		fileErr := func() (retErr error) {
 			// Parse the filename in order to extract the file number. This is
 			// necessary in case WAL recycling was used (which it is usually is). If
 			// we can't parse the filename or it isn't a log file, we'll plow ahead
@@ -116,10 +106,9 @@ func (w *walT) runDump(cmd *cobra.Command, args []string) {
 
 			f, err := w.opts.FS.Open(arg)
 			if err != nil {
-				fmt.Fprintf(stderr, "%s\n", err)
-				return
+				return errors.Wrapf(err, "%s", arg)
 			}
-			defer f.Close()
+			defer func() { retErr = errors.CombineErrors(retErr, f.Close()) }()
 
 			fmt.Fprintf(stdout, "%s\n", arg)
 
@@ -144,15 +133,17 @@ func (w *walT) runDump(cmd *cobra.Command, args []string) {
 					case errors.Is(err, record.ErrInvalidChunk):
 						fmt.Fprintf(stdout, "EOF [%s] (may be due to WAL recycling)\n", err)
 					default:
+						if err != io.EOF {
+							return errors.Wrapf(err, "%s: offset %d", arg, offset)
+						}
 						fmt.Fprintf(stdout, "%s\n", err)
 					}
-					return
+					return nil
 				}
 
 				b = pebble.Batch{}
 				if err := b.SetRepr(buf.Bytes()); err != nil {
-					fmt.Fprintf(stdout, "corrupt batch within log file %q: %v", arg, err)
-					return
+					return errors.Wrapf(err, "corrupt batch within log file %q", arg)
 				}
 				fmt.Fprintf(stdout, "%d(%d) seq=%d count=%d, len=%d\n",
 					offset, len(b.Repr()), b.SeqNum(), b.Count(), buf.Len())
@@ -161,28 +152,24 @@ func (w *walT) runDump(cmd *cobra.Command, args []string) {
 				})
 			}
 		}()
-	}
-	if len(errs) > 0 {
-		fmt.Fprintln(stderr, "Errors: ")
-		for _, ea := range errs {
-			fmt.Fprintf(stderr, "%s: %s\n", ea.arg, ea.err)
+		if fileErr != nil {
+			errs = append(errs, fileErr)
 		}
 	}
+	return errors.Join(errs...)
 }
 
-func (w *walT) runDumpMerged(cmd *cobra.Command, args []string) {
-	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
+func (w *walT) runDumpMerged(cmd *cobra.Command, args []string) error {
+	stdout := cmd.OutOrStdout()
 	w.fmtKey.setForComparer(w.defaultComparer, w.comparers)
 	w.fmtValue.setForComparer(w.defaultComparer, w.comparers)
 	var a wal.FileAccumulator
 	for _, arg := range args {
 		isLog, err := a.MaybeAccumulate(w.opts.FS, arg)
 		if !isLog {
-			fmt.Fprintf(stderr, "%q does not parse as a log file\n", arg)
-			os.Exit(1)
+			return errors.Errorf("%q does not parse as a log file", arg)
 		} else if err != nil {
-			fmt.Fprintf(stderr, "%s: %s\n", arg, err)
-			os.Exit(1)
+			return errors.Wrapf(err, "%s", arg)
 		}
 	}
 	logs := a.Finish()
@@ -192,11 +179,9 @@ func (w *walT) runDumpMerged(cmd *cobra.Command, args []string) {
 		errs = append(errs, w.runDumpMergedOne(cmd, log)...)
 	}
 	if len(errs) > 0 {
-		fmt.Fprintln(stderr, "Errors: ")
-		for _, err := range errs {
-			fmt.Fprintf(stderr, "%s\n", err)
-		}
+		return errors.Join(errs...)
 	}
+	return nil
 }
 
 func (w *walT) runDumpMergedOne(cmd *cobra.Command, ll wal.LogicalLog) []error {
@@ -246,7 +231,7 @@ func (w *walT) runDumpMergedOne(cmd *cobra.Command, ll wal.LogicalLog) []error {
 			logErr(offset, err)
 		})
 	}
-	return nil
+	return errs
 }
 
 func (w *walT) dumpBatch(

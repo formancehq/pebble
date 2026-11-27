@@ -9,6 +9,7 @@ import (
 	"io"
 	"slices"
 
+	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/internal/base"
 	"github.com/cockroachdb/pebble/v2/objstorage"
@@ -44,7 +45,7 @@ func newRemoteCatalog(opts *pebble.Options) *remoteCatalogT {
 Print the contents of the REMOTE-OBJ-CATALOG files.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  m.runDump,
+		RunE: m.runDump,
 	}
 	m.Dump.Flags().BoolVarP(&m.verbose, "verbose", "v", false, "show each record in the catalog")
 	m.Root.AddCommand(m.Dump)
@@ -52,20 +53,23 @@ Print the contents of the REMOTE-OBJ-CATALOG files.
 	return m
 }
 
-func (m *remoteCatalogT) runDump(cmd *cobra.Command, args []string) {
+func (m *remoteCatalogT) runDump(cmd *cobra.Command, args []string) error {
+	var combined error
 	for _, arg := range args {
 		err := m.runDumpOne(cmd.OutOrStdout(), arg)
 		if err != nil {
-			fmt.Fprintf(cmd.OutOrStderr(), "%s\n", err)
+			combined = errors.CombineErrors(combined, err)
 		}
 	}
+	return combined
 }
 
-func (m *remoteCatalogT) runDumpOne(stdout io.Writer, filename string) error {
+func (m *remoteCatalogT) runDumpOne(stdout io.Writer, filename string) (retErr error) {
 	f, err := m.opts.FS.Open(filename)
 	if err != nil {
 		return err
 	}
+	defer func() { retErr = errors.CombineErrors(retErr, f.Close()) }()
 
 	var creatorID objstorage.CreatorID
 	objects := make(map[base.DiskFileNum]remoteobjcat.RemoteObjectMetadata)

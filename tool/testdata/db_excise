@@ -27,15 +27,15 @@ scanned 5 records in 1.0s
 
 db excise foo
 ----
-Error: excise range not specified.
+excise range not specified.
 
 db excise foo --start=gr
 ----
-Error: excise range not specified.
+excise range not specified.
 
 db excise foo --end=t
 ----
-Error: excise range not specified.
+excise range not specified.
 
 db excise foo --start=gr --end=t --yes
 ----

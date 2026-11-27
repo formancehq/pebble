@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -73,7 +72,7 @@ func newSSTable(
 		Short: "verify checksums and metadata",
 		Long:  ``,
 		Args:  cobra.MinimumNArgs(1),
-		Run:   s.runCheck,
+		RunE:  s.runCheck,
 	}
 	s.Layout = &cobra.Command{
 		Use:   "layout <sstables>",
@@ -83,7 +82,7 @@ Print the layout for the sstables. The -v flag controls whether record layout
 is displayed or omitted.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  s.runLayout,
+		RunE: s.runLayout,
 	}
 	s.Properties = &cobra.Command{
 		Use:   "properties <sstables>",
@@ -93,7 +92,7 @@ Print the properties for the sstables. The -v flag controls whether the
 properties are pretty-printed or displayed in a verbose/raw format.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  s.runProperties,
+		RunE: s.runProperties,
 	}
 	s.Scan = &cobra.Command{
 		Use:   "scan <sstables> [manifest-dir]",
@@ -104,7 +103,7 @@ order which means the records will be printed in that order. Raw range
 tombstones are displayed interleaved with point records.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  s.runScan,
+		RunE: s.runScan,
 	}
 	s.Space = &cobra.Command{
 		Use:   "space <sstables>",
@@ -114,7 +113,7 @@ Print the estimated space usage in the specified files for the
 inclusive-inclusive range specified by --start and --end.
 `,
 		Args: cobra.MinimumNArgs(1),
-		Run:  s.runSpace,
+		RunE: s.runSpace,
 	}
 
 	s.Root.AddCommand(s.Check, s.Layout, s.Properties, s.Scan, s.Space)
@@ -171,9 +170,9 @@ func (s *sstableT) newReader(
 	return reader, nil
 }
 
-func (s *sstableT) runCheck(cmd *cobra.Command, args []string) {
+func (s *sstableT) runCheck(cmd *cobra.Command, args []string) error {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
-	s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) {
+	return s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) error {
 		fmt.Fprintf(stdout, "%s\n", path)
 
 		// Update the internal formatter if this comparator has one specified.
@@ -182,15 +181,13 @@ func (s *sstableT) runCheck(cmd *cobra.Command, args []string) {
 
 		iter, err := r.NewIter(sstable.NoTransforms, nil, nil, sstable.AssertNoBlobHandles)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
 
 		// Verify that SeekPrefixGE can find every key in the table.
 		prefixIter, err := r.NewIter(sstable.NoTransforms, nil, nil, sstable.AssertNoBlobHandles)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
 
 		var lastKey base.InternalKey
@@ -216,18 +213,13 @@ func (s *sstableT) runCheck(cmd *cobra.Command, args []string) {
 			}
 		}
 
-		if err := iter.Close(); err != nil {
-			fmt.Fprintf(stdout, "%s\n", err)
-		}
-		if err := prefixIter.Close(); err != nil {
-			fmt.Fprintf(stdout, "%s\n", err)
-		}
+		return errors.CombineErrors(iter.Close(), prefixIter.Close())
 	})
 }
 
-func (s *sstableT) runLayout(cmd *cobra.Command, args []string) {
+func (s *sstableT) runLayout(cmd *cobra.Command, args []string) error {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
-	s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) {
+	return s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) error {
 		// If the file is empty, print a message and return.
 		fmt.Fprintf(stdout, "%s\n", path)
 
@@ -237,8 +229,7 @@ func (s *sstableT) runLayout(cmd *cobra.Command, args []string) {
 
 		l, err := r.Layout()
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
 		var fmtRecord func(key *base.InternalKey, value []byte) string
 		if s.fmtKey.spec != "null" || s.fmtValue.spec != "null" {
@@ -250,23 +241,23 @@ func (s *sstableT) runLayout(cmd *cobra.Command, args []string) {
 			}
 		}
 		_, _ = stdout.Write([]byte(l.Describe(s.verbose, r, fmtRecord)))
+		return nil
 	})
 }
 
-func (s *sstableT) runProperties(cmd *cobra.Command, args []string) {
+func (s *sstableT) runProperties(cmd *cobra.Command, args []string) error {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
-	s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) {
+	return s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) error {
 		fmt.Fprintf(stdout, "%s\n", path)
 
 		if s.verbose {
 			fmt.Fprintf(stdout, "%s", props.String())
-			return
+			return nil
 		}
 
 		stat, err := s.opts.FS.Stat(path)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
 
 		formatNull := func(s string) string {
@@ -281,10 +272,9 @@ func (s *sstableT) runProperties(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(tw, "format\t")
 		format, err := r.TableFormat()
 		if err != nil {
-			fmt.Fprintf(tw, "error when retrieving format %s\n", err)
-		} else {
-			fmt.Fprintf(tw, "%s\n", format.String())
+			return err
 		}
+		fmt.Fprintf(tw, "%s\n", format.String())
 		fmt.Fprintf(tw, "size\t\n")
 		fmt.Fprintf(tw, "  file\t%s\n", humanize.Bytes.Int64(stat.Size()))
 		fmt.Fprintf(tw, "  data\t%s\n", humanize.Bytes.Uint64(props.DataSize))
@@ -330,28 +320,26 @@ func (s *sstableT) runProperties(cmd *cobra.Command, args []string) {
 		for _, key := range keys {
 			fmt.Fprintf(tw, "  %s\t%s\n", key, r.UserProperties[key])
 		}
-		_ = tw.Flush()
+		return tw.Flush()
 	})
 }
 
-func (s *sstableT) runScan(cmd *cobra.Command, args []string) {
+func (s *sstableT) runScan(cmd *cobra.Command, args []string) (retErr error) {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
 	var blobMappings *blobFileMappings
 	if s.blobModeLoad != "" {
 		manifests, err := findManifests(stderr, s.opts.FS, s.blobModeLoad)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
 		blobMappings, err = newBlobFileMappings(stderr, s.opts.FS, s.blobModeLoad, manifests)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
-		defer func() { _ = blobMappings.Close() }()
+		defer func() { retErr = errors.CombineErrors(retErr, blobMappings.Close()) }()
 	}
 
-	s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) {
+	return s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) error {
 		// Update the internal formatter if this comparator has one specified.
 		s.fmtKey.setForComparer(props.ComparerName, s.comparers)
 		s.fmtValue.setForComparer(props.ComparerName, s.comparers)
@@ -370,15 +358,13 @@ func (s *sstableT) runScan(cmd *cobra.Command, args []string) {
 			// If the file number is unset, we are likely trying to read a
 			// non numerically named file.
 			if r.BlockReader().FileNum() == 0 {
-				fmt.Fprintf(stderr, "unset file in path %s\n", path)
-				return
+				return errors.Errorf("unset file in path %s", path)
 			}
 			blobContext = blobMappings.LoadValueBlobContext(base.PhysicalTableFileNum(r.BlockReader().FileNum()))
 		}
 		iter, err := r.NewIter(sstable.NoTransforms, nil, s.end, blobContext)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s%s\n", prefix, err)
-			return
+			return err
 		}
 		iterCloser := base.CloseHelper(iter)
 		defer iterCloser.Close()
@@ -425,15 +411,13 @@ func (s *sstableT) runScan(cmd *cobra.Command, args []string) {
 			return keyspan.NewIter(r.Comparer.Compare, tombstones), nil
 		}()
 		if err != nil {
-			fmt.Fprintf(stdout, "%s%s\n", prefix, err)
-			return
+			return err
 		}
 
 		defer rangeDelIter.Close()
 		rangeDel, err := rangeDelIter.First()
 		if err != nil {
-			fmt.Fprintf(stdout, "%s%s\n", prefix, err)
-			return
+			return err
 		}
 		count := s.count
 
@@ -449,8 +433,7 @@ func (s *sstableT) runScan(cmd *cobra.Command, args []string) {
 					fmt.Fprint(stdout, prefix)
 					v, _, err := kv.Value(nil)
 					if err != nil {
-						fmt.Fprintf(stdout, "%s%s\n", prefix, err)
-						return
+						return err
 					}
 					formatKeyValue(stdout, s.fmtKey, s.fmtValue, &kv.K, v)
 
@@ -475,14 +458,12 @@ func (s *sstableT) runScan(cmd *cobra.Command, args []string) {
 						formatKeyValue(stdout, s.fmtKey, s.fmtValue, &k, v)
 						return nil
 					}); err != nil {
-						fmt.Fprintf(stdout, "%s\n", err)
-						os.Exit(1)
+						return err
 					}
 				}
 				rangeDel, err = rangeDelIter.Next()
 				if err != nil {
-					fmt.Fprintf(stdout, "%s\n", err)
-					os.Exit(1)
+					return err
 				}
 			}
 
@@ -497,8 +478,7 @@ func (s *sstableT) runScan(cmd *cobra.Command, args []string) {
 		// Handle range keys.
 		rkIter, err := r.NewRawRangeKeyIter(context.Background(), sstable.NoFragmentTransforms, sstable.NoReadEnv)
 		if err != nil {
-			fmt.Fprintf(stdout, "%s\n", err)
-			os.Exit(1)
+			return err
 		}
 		if rkIter != nil {
 			defer rkIter.Close()
@@ -528,26 +508,26 @@ func (s *sstableT) runScan(cmd *cobra.Command, args []string) {
 				}
 			}
 			if err != nil {
-				fmt.Fprintf(stdout, "%s\n", err)
-				os.Exit(1)
+				return err
 			}
 		}
 
 		if err := iterCloser.Close(); err != nil {
-			fmt.Fprintf(stdout, "%s\n", err)
+			return err
 		}
+		return nil
 	})
 }
 
-func (s *sstableT) runSpace(cmd *cobra.Command, args []string) {
+func (s *sstableT) runSpace(cmd *cobra.Command, args []string) error {
 	stdout, stderr := cmd.OutOrStdout(), cmd.OutOrStderr()
-	s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) {
+	return s.foreachSstable(stderr, args, func(path string, r *sstable.Reader, props sstable.Properties) error {
 		bytes, err := r.EstimateDiskUsage(s.start, s.end, sstable.NoReadEnv)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s\n", err)
-			return
+			return err
 		}
 		fmt.Fprintf(stdout, "%s: %d\n", path, bytes)
+		return nil
 	})
 }
 
@@ -556,18 +536,17 @@ func (s *sstableT) runSpace(cmd *cobra.Command, args []string) {
 func (s *sstableT) foreachSstable(
 	stderr io.Writer,
 	args []string,
-	fn func(path string, r *sstable.Reader, props sstable.Properties),
-) {
+	fn func(path string, r *sstable.Reader, props sstable.Properties) error,
+) error {
 	processFileFn := func(path string, r *sstable.Reader) error {
 		props, err := r.ReadPropertiesBlock(context.Background(), nil /* buffer pool */)
 		if err != nil {
 			return err
 		}
-		fn(path, r, props)
-		return nil
+		return fn(path, r, props)
 	}
 	closeReaderFn := func(r *sstable.Reader) error {
 		return r.Close()
 	}
-	processFiles(stderr, s.opts.FS, args, []string{".sst", ".ldb"}, s.newReader, closeReaderFn, processFileFn)
+	return processFiles(stderr, s.opts.FS, args, []string{".sst", ".ldb"}, s.newReader, closeReaderFn, processFileFn)
 }

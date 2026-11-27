@@ -141,12 +141,19 @@ func runTests(t *testing.T, path string) {
 					KeySchemas(&cockroachkvs.KeySchema),
 				)
 
-				c := &cobra.Command{}
+				c := &cobra.Command{SilenceUsage: true, SilenceErrors: true}
 				c.AddCommand(tool.Commands...)
 				c.SetArgs(args)
 				c.SetOut(&buf)
 				c.SetErr(&buf)
 				if err := c.Execute(); err != nil {
+					if buf.Len() > 0 {
+						output := buf.String()
+						if strings.HasSuffix(output, "\n") {
+							return strings.TrimSuffix(output, "\n") + "\n" + err.Error()
+						}
+						return output + "Error: " + err.Error()
+					}
 					return err.Error()
 				}
 				output := buf.String()
